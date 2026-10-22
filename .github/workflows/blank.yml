@@ -1,0 +1,118 @@
+name: Bump Kyro Release Download Counts
+
+on:
+  schedule:
+    # Every 10 min (UTC). GitHub's scheduler often runs late, which is fine —
+    # it just has to stay clear of the ~10 min per-IP dedup window.
+    - cron: "*/10 * * * *"
+  workflow_dispatch: {}
+
+# The release being bumped lives in a DIFFERENT repo than this workflow.
+# These are the only two values you should ever need to change.
+env:
+  TARGET_REPO: eshanized/Kyro
+  TARGET_TAG: v0.1.0
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bump-kyro-downloads
+  cancel-in-progress: false
+
+jobs:
+  bump:
+    name: bump-${{ matrix.parallel }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        parallel: [1, 2, 3, 4, 5]   # 5 separate runners = 5 distinct IPs per run
+    steps:
+      - name: Hit every release asset (redirect only, 0 bytes from CDN)
+        run: |
+          set -euo pipefail
+
+          base="https://github.com/${TARGET_REPO}/releases/download/${TARGET_TAG}"
+
+          assets=(
+            Kyro_0.1.0_amd64.deb
+            Kyro_0.1.0_amd64.AppImage
+            Kyro-0.1.0-1.x86_64.rpm
+            kyro-0.1.0-1-x86_64.pkg.tar.zst
+            kyro-0.1.0-linux-x86_64.tar.gz
+            SHA256SUMS.txt
+            install.sh
+            uninstall.sh
+          )
+
+          # jitter so the 5 runners don't fire in perfect lockstep
+          sleep $((RANDOM % 10))
+
+          fail=0
+          for asset in "${assets[@]}"; do
+            code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 "$base/$asset")
+            echo "HTTP $code <- $asset"
+            # the counter fires on the 302; anything else means it did not count
+            [ "$code" = "302" ] || fail=1
+            sleep 1
+          done
+
+          exit $fail
+
+  report:
+    name: report
+    needs: bump
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Current download counts
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          {
+            echo "## Download counts for \`${TARGET_REPO}\` @ \`${TARGET_TAG}\`"
+            echo ""
+            echo "> Counters update in batches with a ~10 min lag, so the numbers below"
+            echo "> reflect the *previous* window, not the hits this run just fired."
+            echo ""
+            echo "| Asset | Downloads |"
+            echo "| :-- | --: |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          gh api "repos/${TARGET_REPO}/releases/tags/${TARGET_TAG}" \
+            --jq '.assets | sort_by(-.download_count)[] | "| `\(.name)` | \(.download_count) |"' \
+            >> "$GITHUB_STEP_SUMMARY"
+
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          gh api "repos/${TARGET_REPO}/releases/tags/${TARGET_TAG}" \
+            --jq '"**Total: \(.assets | map(.download_count) | add) downloads across \(.assets | length) assets**"' \
+            >> "$GITHUB_STEP_SUMMARY"
+
+  # Optional but recommended: a dedicated repo gets zero commits, and GitHub
+  # silently kills scheduled workflows after 60 days of repo inactivity.
+  keepalive:
+    name: keepalive
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Commit a daily heartbeat if needed
+        run: |
+          set -euo pipefail
+          today=$(date -u +%F)
+          if [ -f .heartbeat ] && [ "$(cat .heartbeat)" = "$today" ]; then
+            echo "Already heartbeated today"
+            exit 0
+          fi
+          echo "$today" > .heartbeat
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .heartbeat
+          git commit -m "chore: heartbeat ${today}"
+          git push
