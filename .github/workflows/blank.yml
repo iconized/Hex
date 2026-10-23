@@ -37,14 +37,9 @@ jobs:
           base="https://github.com/${TARGET_REPO}/releases/download/${TARGET_TAG}"
 
           assets=(
-            Kyro_0.1.0_amd64.deb
-            Kyro_0.1.0_amd64.AppImage
-            Kyro-0.1.0-1.x86_64.rpm
-            kyro-0.1.0-1-x86_64.pkg.tar.zst
-            kyro-0.1.0-linux-x86_64.tar.gz
-            SHA256SUMS.txt
-            install.sh
-            uninstall.sh
+            Kyro_0.1.1_amd64.deb
+            Kyro_0.1.1_amd64.AppImage
+            Kyro-0.1.1-1.x86_64.rpm
           )
 
           # jitter so the 5 runners don't fire in perfect lockstep
