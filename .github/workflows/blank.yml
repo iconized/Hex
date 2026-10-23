@@ -11,7 +11,7 @@ on:
 # These are the only two values you should ever need to change.
 env:
   TARGET_REPO: eshanized/Kyro
-  TARGET_TAG: v0.1.0
+  TARGET_TAG: v0.1.1
 
 permissions:
   contents: read
@@ -28,7 +28,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        parallel: [1, 2, 3, 4, 5]   # 5 separate runners = 5 distinct IPs per run
+        parallel: [1, 2, 3]   # 5 separate runners = 5 distinct IPs per run
     steps:
       - name: Hit every release asset (redirect only, 0 bytes from CDN)
         run: |
