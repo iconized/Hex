@@ -5,13 +5,18 @@ on:
     # Every 10 min (UTC). GitHub's scheduler often runs late, which is fine —
     # it just has to stay clear of the ~10 min per-IP dedup window.
     - cron: "*/10 * * * *"
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Override tag (blank = auto-detect latest release)"
+        required: false
+        default: ""
 
 # The release being bumped lives in a DIFFERENT repo than this workflow.
-# These are the only two values you should ever need to change.
+# TARGET_TAG is now optional: leave it blank to always track the latest release.
 env:
   TARGET_REPO: eshanized/Kyro
-  TARGET_TAG: v0.1.1
+  TARGET_TAG: ""
 
 permissions:
   contents: read
@@ -21,33 +26,76 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Resolve the tag + asset list once, so every downstream job agrees on the
+  # same release even if a new one is published mid-run.
+  resolve:
+    name: resolve
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.latest.outputs.tag }}
+      assets: ${{ steps.latest.outputs.assets }}
+    steps:
+      - name: Resolve target release
+        id: latest
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          tag="${TARGET_TAG:-}"
+          if [ -z "$tag" ]; then
+            tag="${OVERRIDE_TAG:-}"
+          fi
+          if [ -z "$tag" ]; then
+            tag=$(gh api "repos/${TARGET_REPO}/releases/latest" --jq '.tag_name')
+          fi
+
+          # Asset names come straight from the API, so no filename hardcoding.
+          assets=$(gh api "repos/${TARGET_REPO}/releases/tags/${tag}" \
+            --jq -c '[.assets[].name]')
+
+          echo "Resolved tag: $tag"
+          echo "Assets: $assets"
+
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "assets=$assets" >> "$GITHUB_OUTPUT"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OVERRIDE_TAG: ${{ inputs.tag }}
+
   bump:
     name: bump-${{ matrix.parallel }}
+    needs: resolve
     runs-on: ubuntu-latest
     timeout-minutes: 5
     strategy:
       fail-fast: false
       matrix:
-        parallel: [1, 2, 3]   # 5 separate runners = 5 distinct IPs per run
+        parallel: [1, 2, 3, 4, 5]   # 5 runners = 5 distinct IPs per run
     steps:
       - name: Hit every release asset (redirect only, 0 bytes from CDN)
+        env:
+          TAG: ${{ needs.resolve.outputs.tag }}
+          ASSETS: ${{ needs.resolve.outputs.assets }}
         run: |
           set -euo pipefail
 
-          base="https://github.com/${TARGET_REPO}/releases/download/${TARGET_TAG}"
+          base="https://github.com/${TARGET_REPO}/releases/download/${TAG}"
 
-          assets=(
-            Kyro_0.1.1_amd64.deb
-            Kyro_0.1.1_amd64.AppImage
-            Kyro-0.1.1-1.x86_64.rpm
-          )
+          mapfile -t assets < <(jq -r '.[]' <<<"$ASSETS")
+          if [ "${#assets[@]}" -eq 0 ]; then
+            echo "No assets found for ${TARGET_REPO}@${TAG}"
+            exit 1
+          fi
 
-          # jitter so the 5 runners don't fire in perfect lockstep
+          # jitter so the runners don't fire in perfect lockstep
           sleep $((RANDOM % 10))
 
           fail=0
           for asset in "${assets[@]}"; do
-            code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 "$base/$asset")
+            # percent-encode the name so spaces / odd chars survive the path
+            url="${base}/$(jq -rn --arg n "$asset" '$n|@uri')"
+            code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 "$url")
             echo "HTTP $code <- $asset"
             # the counter fires on the 302; anything else means it did not count
             [ "$code" = "302" ] || fail=1
@@ -58,7 +106,7 @@ jobs:
 
   report:
     name: report
-    needs: bump
+    needs: [resolve, bump]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -66,11 +114,14 @@ jobs:
       - name: Current download counts
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.resolve.outputs.tag }}
         run: |
           set -euo pipefail
 
+          [ -n "${TAG:-}" ] || { echo "Tag unresolved; skipping report" >&2; exit 0; }
+
           {
-            echo "## Download counts for \`${TARGET_REPO}\` @ \`${TARGET_TAG}\`"
+            echo "## Download counts for \`${TARGET_REPO}\` @ \`${TAG}\`"
             echo ""
             echo "> Counters update in batches with a ~10 min lag, so the numbers below"
             echo "> reflect the *previous* window, not the hits this run just fired."
@@ -79,12 +130,12 @@ jobs:
             echo "| :-- | --: |"
           } >> "$GITHUB_STEP_SUMMARY"
 
-          gh api "repos/${TARGET_REPO}/releases/tags/${TARGET_TAG}" \
+          gh api "repos/${TARGET_REPO}/releases/tags/${TAG}" \
             --jq '.assets | sort_by(-.download_count)[] | "| `\(.name)` | \(.download_count) |"' \
             >> "$GITHUB_STEP_SUMMARY"
 
           echo "" >> "$GITHUB_STEP_SUMMARY"
-          gh api "repos/${TARGET_REPO}/releases/tags/${TARGET_TAG}" \
+          gh api "repos/${TARGET_REPO}/releases/tags/${TAG}" \
             --jq '"**Total: \(.assets | map(.download_count) | add) downloads across \(.assets | length) assets**"' \
             >> "$GITHUB_STEP_SUMMARY"
 
